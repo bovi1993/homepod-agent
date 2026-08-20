@@ -1,9 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
-import { Activity, Camera, Home as HomeIcon, MessageCircle, Settings, Wind } from "lucide-react";
+import { MessageCircle, RefreshCw, Sparkles } from "lucide-react";
+import { Shell, Pill, SectionLabel } from "../components/Shell";
+import {
+  DeviceTile,
+  SceneChip,
+  StatusStat,
+  sendDeviceCommand,
+  type DeviceSnap,
+} from "../components/DeviceTile";
 
 const fetcher = (url: string) =>
   fetch(url).then((r) => {
@@ -23,23 +31,6 @@ interface Accessory {
   locked?: boolean | null;
 }
 
-interface DeviceSnap {
-  id: string;
-  name: string;
-  kind: string;
-  room: string;
-  reachable: boolean;
-  on?: boolean | null;
-  aqi?: number | null;
-  mode?: string | null;
-  battery_level?: number | null;
-  status?: string | null;
-  cleaning?: boolean | null;
-  charging?: boolean | null;
-  filter_life_remaining?: number | null;
-  error?: string | null;
-}
-
 interface Snapshot {
   home_id: string;
   name: string;
@@ -47,213 +38,419 @@ interface Snapshot {
   captured_at: number;
 }
 
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h < 5) return "Good night";
+  if (h < 12) return "Good morning";
+  if (h < 18) return "Good afternoon";
+  return "Good evening";
+}
+
+function accessoryToSnap(a: Accessory): DeviceSnap {
+  return {
+    id: `hk:${a.id}`,
+    name: a.name,
+    kind: a.kind,
+    room: a.room || "Home",
+    reachable: a.reachable,
+    on: a.on,
+    status:
+      a.locked === true
+        ? "Locked"
+        : a.locked === false
+          ? "Unlocked"
+          : a.temperature != null
+            ? `${a.temperature.toFixed(1)}°C`
+            : undefined,
+    source: "homekit",
+  };
+}
+
 export default function Page() {
-  const { data, error, isLoading } = useSWR<{ ok: boolean; data: Snapshot }>(
-    "/api/homekit/state",
-    fetcher,
-    { refreshInterval: 5000 }
-  );
-  const { data: devData } = useSWR<{ ok: boolean; data: DeviceSnap[] }>(
-    "/api/devices/devices",
-    fetcher,
-    { refreshInterval: 10000 }
-  );
-  const [ws, setWs] = useState<WebSocket | null>(null);
+  const {
+    data,
+    error: hkError,
+    isLoading,
+    mutate: mutHk,
+  } = useSWR<{ ok: boolean; data: Snapshot }>("/api/homekit/state", fetcher, {
+    refreshInterval: 5000,
+  });
+  const {
+    data: devData,
+    error: devError,
+    mutate: mutDev,
+  } = useSWR<{ ok: boolean; data: DeviceSnap[] }>("/api/devices/devices", fetcher, {
+    refreshInterval: 8000,
+  });
+  const { data: health } = useSWR("/api/agent/health", fetcher, {
+    refreshInterval: 15000,
+  });
+
+  const [live, setLive] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [sceneBusy, setSceneBusy] = useState<string | null>(null);
 
   useEffect(() => {
-    const url = (process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:51827/ws/state") + "/ws/state";
-    const sock = new WebSocket(url);
-    sock.onopen = () => setWs(sock);
-    sock.onclose = () => setWs(null);
-    return () => sock.close();
+    const base = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:51827";
+    const url = base.includes("/ws") ? base : `${base}/ws/state`;
+    let sock: WebSocket | null = null;
+    try {
+      sock = new WebSocket(url);
+      sock.onopen = () => setLive(true);
+      sock.onclose = () => setLive(false);
+      sock.onerror = () => setLive(false);
+    } catch {
+      setLive(false);
+    }
+    return () => sock?.close();
   }, []);
 
   const snap = data?.data;
   const accessories = snap?.accessories ?? [];
-  const devices = devData?.data ?? [];
-  const rooms = Array.from(new Set(accessories.map((a) => a.room)));
+  const miio = (devData?.data ?? []).map((d) => ({ ...d, source: "device" as const }));
+
+  const all: DeviceSnap[] = useMemo(() => {
+    const hk = accessories.map(accessoryToSnap);
+    // Prefer miio device over HK mirror when same name/kind
+    const names = new Set(miio.map((d) => d.name.toLowerCase()));
+    const filteredHk = hk.filter((h) => !names.has(h.name.toLowerCase()));
+    return [...miio, ...filteredHk];
+  }, [accessories, miio]);
+
+  const rooms = useMemo(() => {
+    const map = new Map<string, DeviceSnap[]>();
+    for (const d of all) {
+      const room = d.room || "Home";
+      if (!map.has(room)) map.set(room, []);
+      map.get(room)!.push(d);
+    }
+    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [all]);
+
+  const favorites = useMemo(() => {
+    // High-signal: vacuums, purifiers, anything on/cleaning, locks
+    return all
+      .filter(
+        (d) =>
+          d.kind.includes("vacuum") ||
+          d.kind.includes("purifier") ||
+          d.kind === "lock" ||
+          d.cleaning ||
+          d.on === true
+      )
+      .slice(0, 8);
+  }, [all]);
+
+  const vacuum = all.find((d) => d.kind.includes("vacuum"));
+  const purifier = all.find((d) => d.kind.includes("purifier"));
+  const lock = accessories.find((a) => a.locked != null);
+  const temps = accessories.filter((a) => a.temperature != null);
+
+  const flash = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 2800);
+  };
+
+  const onAction = useCallback(
+    async (d: DeviceSnap, action: string) => {
+      if (d.source === "homekit") {
+        flash("HomeKit control via bridge — use Chat or Home.app for now");
+        return;
+      }
+      setBusyId(d.id);
+      const res = await sendDeviceCommand(d.id, action);
+      setBusyId(null);
+      if (!res.ok) flash(res.error || "Command failed");
+      else {
+        flash(`${d.name}: ${action.replace("_", " ")}`);
+        mutDev();
+      }
+    },
+    [mutDev]
+  );
+
+  async function runScene(id: string) {
+    setSceneBusy(id);
+    try {
+      if (id === "clean" && vacuum) {
+        await sendDeviceCommand(vacuum.id, vacuum.cleaning ? "stop" : "start");
+        mutDev();
+        flash(vacuum.cleaning ? "Vacuum stopped" : "Vacuum started");
+      } else if (id === "air" && purifier) {
+        await sendDeviceCommand(purifier.id, purifier.on ? "turn_off" : "turn_on");
+        mutDev();
+        flash(purifier.on ? "Purifier off" : "Purifier on");
+      } else if (id === "away" || id === "night" || id === "home") {
+        // Route through agent chat API as natural language scene
+        const prompts: Record<string, string> = {
+          away: "Run away scene: turn off lights, start vacuum if docked, summarize lock status",
+          night: "Run night scene: lights off or dim, ensure vacuum is docked, status summary",
+          home: "I'm home: stop vacuum if cleaning near doors, status summary of air and locks",
+        };
+        await fetch("/api/agent/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ user: prompts[id] }),
+        }).catch(() => null);
+        flash(`Scene “${id}” sent to agent`);
+      } else {
+        flash("Scene needs a linked device — add via cloud-sync");
+      }
+    } finally {
+      setSceneBusy(null);
+    }
+  }
+
+  const agentOk = health?.ok !== false && !health?.error;
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
-      <header className="mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-semibold">homepod-agent</h1>
-          <p className="text-sm text-muted-foreground">
-            {snap?.name ?? "Loading…"} · {ws ? "live" : "polling"}
-          </p>
-        </div>
-        <nav className="flex gap-2">
-          <NavLink href="/" icon={<HomeIcon size={16} />} label="Home" />
-          <NavLink href="/chat" icon={<MessageCircle size={16} />} label="Chat" />
-          <NavLink href="/cameras" icon={<Camera size={16} />} label="Cameras" />
-          <NavLink href="/settings" icon={<Settings size={16} />} label="Settings" />
-        </nav>
-      </header>
-
-      {error && (
-        <div className="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-red-800">
-          Could not reach agent: {String(error.message)}
+    <Shell
+      title={greeting()}
+      subtitle={
+        <span className="flex flex-wrap items-center gap-2">
+          <span>{snap?.name ?? "Home"}</span>
+          <Pill ok={agentOk} label="Agent" />
+          <Pill ok={!hkError && !!snap} label="HomeKit" />
+          <Pill
+            ok={!devError}
+            label="Devices"
+            detail={miio.length ? String(miio.length) : undefined}
+          />
+          <Pill ok={live} label={live ? "Live" : "Poll"} />
+        </span>
+      }
+      right={
+        <button
+          type="button"
+          onClick={() => {
+            mutHk();
+            mutDev();
+          }}
+          className="rounded-full border border-white/[0.08] bg-white/[0.03] p-2 text-fg-muted hover:bg-white/[0.06] hover:text-fg"
+          aria-label="Refresh"
+        >
+          <RefreshCw size={16} />
+        </button>
+      }
+    >
+      {toast && (
+        <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-full border border-white/10 bg-elevated px-4 py-2 text-sm shadow-soft sm:bottom-8">
+          {toast}
         </div>
       )}
 
-      {isLoading && <p className="text-muted-foreground">Loading home…</p>}
+      {/* Status strip */}
+      <section className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <StatusStat
+          label="Security"
+          value={
+            lock
+              ? lock.locked
+                ? "Locked"
+                : "Unlocked"
+              : accessories.length
+                ? "No lock"
+                : "—"
+          }
+          tone={lock ? (lock.locked ? "ok" : "warn") : "neutral"}
+        />
+        <StatusStat
+          label="Climate"
+          value={
+            temps.length
+              ? `${(
+                  temps.reduce((s, t) => s + (t.temperature || 0), 0) / temps.length
+                ).toFixed(1)}°C`
+              : "—"
+          }
+        />
+        <StatusStat
+          label="Air"
+          value={
+            purifier
+              ? purifier.reachable
+                ? purifier.aqi != null
+                  ? `AQI ${purifier.aqi}`
+                  : purifier.on
+                    ? "On"
+                    : "Off"
+                : "Offline"
+              : "No purifier"
+          }
+          tone={
+            purifier && !purifier.reachable
+              ? "bad"
+              : purifier?.aqi != null && purifier.aqi > 100
+                ? "warn"
+                : purifier?.on
+                  ? "ok"
+                  : "neutral"
+          }
+        />
+        <StatusStat
+          label="Vacuum"
+          value={
+            vacuum
+              ? !vacuum.reachable
+                ? "Offline"
+                : vacuum.cleaning
+                  ? "Cleaning"
+                  : vacuum.charging
+                    ? "Docked"
+                    : vacuum.status || "Idle"
+              : "No robot"
+          }
+          tone={
+            vacuum && !vacuum.reachable
+              ? "bad"
+              : vacuum?.cleaning
+                ? "info"
+                : vacuum?.reachable
+                  ? "ok"
+                  : "neutral"
+          }
+        />
+      </section>
 
-      {devices.length > 0 && (
+      {/* Scenes */}
+      <section className="mb-8">
+        <SectionLabel>Scenes</SectionLabel>
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          <SceneChip
+            label="Home"
+            hint="Status + settle"
+            active={sceneBusy === "home"}
+            onClick={() => runScene("home")}
+          />
+          <SceneChip
+            label="Away"
+            hint="Secure + clean"
+            active={sceneBusy === "away"}
+            onClick={() => runScene("away")}
+          />
+          <SceneChip
+            label="Clean"
+            hint={vacuum?.cleaning ? "Stop vacuum" : "Start vacuum"}
+            active={sceneBusy === "clean"}
+            onClick={() => runScene("clean")}
+          />
+          <SceneChip
+            label="Air"
+            hint={purifier?.on ? "Purifier off" : "Purifier on"}
+            active={sceneBusy === "air"}
+            onClick={() => runScene("air")}
+          />
+          <SceneChip
+            label="Night"
+            hint="Wind down"
+            active={sceneBusy === "night"}
+            onClick={() => runScene("night")}
+          />
+        </div>
+      </section>
+
+      {/* Ask home */}
+      <Link
+        href="/chat"
+        className="mb-8 flex items-center gap-3 rounded-tile border border-white/[0.08] bg-white/[0.03] px-4 py-3 transition hover:bg-white/[0.055]"
+      >
+        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent/20 text-accent">
+          <Sparkles size={16} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] font-medium">Ask your home…</div>
+          <div className="truncate text-[12px] text-fg-faint">
+            “Is the Dreame docked?” · “Turn on the purifier”
+          </div>
+        </div>
+        <MessageCircle size={16} className="text-fg-faint" />
+      </Link>
+
+      {/* Errors / empty */}
+      {hkError && devError && (
+        <div className="mb-6 rounded-tile border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-fg-secondary">
+          Agent services offline. Start with{" "}
+          <code className="rounded bg-white/10 px-1 text-xs">make run</code> or check
+          ports 8000 / 51827 / 8002.
+        </div>
+      )}
+
+      {isLoading && all.length === 0 && (
+        <p className="text-sm text-fg-muted">Loading home…</p>
+      )}
+
+      {all.length === 0 && !isLoading && (
+        <div className="mb-8 rounded-tile border border-white/[0.08] bg-white/[0.03] p-6">
+          <h3 className="text-lg font-medium">No devices yet</h3>
+          <p className="mt-2 max-w-md text-sm text-fg-muted">
+            Pair HomeKit bridge accessories, or pull Xiaomi / Dreame tokens:
+          </p>
+          <pre className="mt-3 overflow-x-auto rounded-lg bg-black/40 p-3 text-[12px] text-fg-secondary">
+            {`homepod-agent devices cloud-sync \\
+  --username YOU --password '…' --country de`}
+          </pre>
+          <p className="mt-3 text-xs text-fg-faint">
+            See docs/devices.md · Dreame found on LAN needs cloud token once.
+          </p>
+        </div>
+      )}
+
+      {/* Favorites */}
+      {favorites.length > 0 && (
         <section className="mb-8">
-          <h2 className="mb-4 flex items-center gap-2 text-lg font-medium">
-            <Wind size={18} />
-            Xiaomi / Dreame · {devices.length}
-          </h2>
+          <SectionLabel>Favorites</SectionLabel>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            {devices.map((d) => (
-              <DeviceTile key={d.id} d={d} />
+            {favorites.map((d) => (
+              <DeviceTile
+                key={d.id}
+                d={d}
+                busy={busyId === d.id}
+                onAction={onAction}
+              />
             ))}
           </div>
         </section>
       )}
 
-      {snap && (
-        <div className="space-y-8">
-          <section>
-            <h2 className="mb-4 flex items-center gap-2 text-lg font-medium">
-              <Activity size={18} />
-              {accessories.length} accessories
-            </h2>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              {accessories.map((a) => (
-                <AccessoryTile key={a.id} a={a} />
-              ))}
-            </div>
-          </section>
+      {/* Rooms */}
+      {rooms.map(([room, devices]) => (
+        <section key={room} className="mb-8">
+          <SectionLabel>{room}</SectionLabel>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {devices.map((d) => (
+              <DeviceTile
+                key={d.id}
+                d={d}
+                busy={busyId === d.id}
+                onAction={onAction}
+              />
+            ))}
+          </div>
+        </section>
+      ))}
 
-          {rooms.length > 0 && (
-            <section>
-              <h2 className="mb-4 text-lg font-medium">By room</h2>
-              <div className="space-y-6">
-                {rooms.map((room) => (
-                  <div key={room}>
-                    <h3 className="mb-2 text-sm font-medium text-muted-foreground">
-                      {room}
-                    </h3>
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                      {accessories
-                        .filter((a) => a.room === room)
-                        .map((a) => (
-                          <AccessoryTile key={a.id} a={a} />
-                        ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-        </div>
-      )}
-    </main>
-  );
-}
-
-function NavLink({
-  href,
-  icon,
-  label,
-}: {
-  href: string;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm hover:bg-accent/10"
-    >
-      {icon}
-      {label}
-    </Link>
-  );
-}
-
-function AccessoryTile({ a }: { a: Accessory }) {
-  const status = a.on === true ? "On" : a.on === false ? "Off" : a.locked ? "Locked" : a.locked === false ? "Unlocked" : "—";
-  const dot =
-    a.on === true ? "bg-green-500" : a.on === false ? "bg-gray-400" : a.locked === true ? "bg-green-500" : a.locked === false ? "bg-amber-500" : "bg-gray-300";
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="flex items-center gap-2">
-        <span className={`inline-block h-2.5 w-2.5 rounded-full ${dot}`} />
-        <span className="text-sm font-medium">{a.name}</span>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        {a.kind} · {a.room}
-      </p>
-      <div className="mt-3 flex items-center justify-between text-sm">
-        <span className="text-muted-foreground">Status</span>
-        <span>{status}</span>
-      </div>
-      {a.brightness != null && (
-        <div className="mt-2 h-1.5 rounded-full bg-border">
-          <div
-            className="h-full rounded-full bg-accent"
-            style={{ width: `${a.brightness}%` }}
-          />
-        </div>
-      )}
-      {a.temperature != null && (
-        <div className="mt-3 flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Temp</span>
-          <span>{a.temperature.toFixed(1)}°C</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DeviceTile({ d }: { d: DeviceSnap }) {
-  const dot = !d.reachable
-    ? "bg-red-400"
-    : d.cleaning
-      ? "bg-blue-500"
-      : d.on
-        ? "bg-green-500"
-        : "bg-gray-400";
-  let status = "—";
-  if (!d.reachable) status = d.error ? "Down" : "Offline";
-  else if (d.kind === "vacuum") {
-    status = d.cleaning ? "Cleaning" : d.charging ? "Docked" : d.status || "Idle";
-  } else if (d.kind === "air_purifier") {
-    status = d.on ? `On · AQI ${d.aqi ?? "—"}` : "Off";
-  }
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="flex items-center gap-2">
-        <span className={`inline-block h-2.5 w-2.5 rounded-full ${dot}`} />
-        <span className="text-sm font-medium">{d.name}</span>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        {d.kind} · {d.room}
-      </p>
-      <div className="mt-3 flex items-center justify-between text-sm">
-        <span className="text-muted-foreground">Status</span>
-        <span className="text-right">{status}</span>
-      </div>
-      {d.battery_level != null && (
-        <div className="mt-2 flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Battery</span>
-          <span>{d.battery_level}%</span>
-        </div>
-      )}
-      {d.filter_life_remaining != null && (
-        <div className="mt-2 flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Filter</span>
-          <span>{d.filter_life_remaining}%</span>
-        </div>
-      )}
-      {d.mode && (
-        <div className="mt-2 flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Mode</span>
-          <span>{d.mode}</span>
-        </div>
-      )}
-    </div>
+      {/* Automation teaser */}
+      <section className="mb-4 rounded-tile border border-dashed border-white/[0.1] bg-white/[0.02] p-4">
+        <SectionLabel>Suggested automations</SectionLabel>
+        <ul className="space-y-2 text-sm text-fg-secondary">
+          <li className="flex gap-2">
+            <span className="text-accent">→</span>
+            Away: start vacuum when last phone leaves Wi‑Fi
+          </li>
+          <li className="flex gap-2">
+            <span className="text-accent">→</span>
+            Air: purifier on when AQI &gt; 100
+          </li>
+          <li className="flex gap-2">
+            <span className="text-accent">→</span>
+            Night: dock vacuum + summary via agent
+          </li>
+        </ul>
+        <p className="mt-3 text-xs text-fg-faint">
+          Spec in docs/ux-home-experience.md — wire rules after tokens land.
+        </p>
+      </section>
+    </Shell>
   );
 }
