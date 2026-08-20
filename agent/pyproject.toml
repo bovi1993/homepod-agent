@@ -10,8 +10,7 @@ authors = [
 ]
 dependencies = [
     # HomeKit
-    "pyhap>=1.4.0",
-    "aiohomekit>=1.0.0",
+    "HAP-python>=5.0.0",
     # LLM
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
@@ -20,14 +19,15 @@ dependencies = [
     "anthropic>=0.20.0",
     "openai>=1.10.0",
     # Voice
-    "pyatv>=0.14.0",
     "zeroconf>=0.131.0",
     "sounddevice>=0.4.6",
     "numpy>=1.26.0",
     "websockets>=12.0",
     # Cameras
-    "onvif-zeep>=0.2.12",
     "opencv-python>=4.9.0",
+    # Xiaomi / Dreame (local miio + cloud token pull)
+    "python-miio>=0.5.12",
+    "micloud>=0.6",
     # Storage
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.19.0",

@@ -164,3 +164,10 @@ class HomeKitServer:
         server = uvicorn.Server(config)
         log.info("server.starting", port=self.port)
         await server.serve()
+
+
+# Module-level FastAPI app for `uvicorn homekit.server:app`.
+# Wires the bridge + state store together so uvicorn can pick it up directly.
+_default_bridge = HomeKitBridge()
+_default_store = _default_bridge.store
+app = HomeKitServer(_default_bridge, _default_store).app

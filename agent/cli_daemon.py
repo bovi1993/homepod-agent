@@ -51,11 +51,25 @@ async def _cameras_svc() -> None:
     await uvicorn.Server(config).serve()
 
 
+async def _devices_svc() -> None:
+    import uvicorn
+
+    from devices.manager import DeviceManager
+    from devices.server import DevicesServer
+
+    mgr = DeviceManager(poll_interval_s=30.0)
+    await mgr.start()
+    server = DevicesServer(mgr, port=8002)
+    config = uvicorn.Config(server.app, host="0.0.0.0", port=8002, log_level="info")
+    await uvicorn.Server(config).serve()
+
+
 SERVICES: dict[str, "object"] = {  # type: ignore[type-arg]
     "homekit": _homekit_svc,
     "llm": _llm_svc,
     "voice": _voice_svc,
     "cameras": _cameras_svc,
+    "devices": _devices_svc,
 }
 
 

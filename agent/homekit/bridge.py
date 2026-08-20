@@ -114,6 +114,15 @@ class HomeKitBridge:
         # see "live" status without polling.
         self._task = asyncio.create_task(self._heartbeat())
 
+    async def start_hap_only(self) -> None:
+        """Boot just the HAP driver (no heartbeat, no stub fallback).
+
+        Used by the pairing helper, which only needs the HAP socket open and
+        doesn't need state-store broadcasting.
+        """
+        log.info("bridge.start_hap_only", port=self.config.port, ip=self._ip)
+        await self._start_pyhap()
+
     async def stop(self) -> None:
         log.info("bridge.stop")
         self._stopped.set()
@@ -195,23 +204,128 @@ class HomeKitBridge:
     async def _start_pyhap(self) -> None:
         # Imported lazily so the rest of the package stays importable when
         # pyhap isn't installed.
-        from pyhap.accessory import Accessory
+        from pyhap.accessory import Accessory, Bridge
         from pyhap.accessory_driver import AccessoryDriver
-        from pyhap.const import STANDALONE
+        from pyhap.const import CATEGORY_SWITCH
 
+        # HAP setup code for SRP: MUST be the XXX-XX-XXX form as BYTES,
+        # including the dashes. pyhap's generate_pincode() returns
+        # b'980-79-785'; SrpServer hashes `b"Pair-Setup:" + pincode` with
+        # those dashes intact. iOS Home.app does the same. Passing bare
+        # digits (b'52823145') makes every SRP attempt fail with
+        # "setup code is wrong".
+        formatted = self.setup_code  # already XXX-XX-XXX from _format_setup_code
+        digits = formatted.replace("-", "")
+        if len(digits) != 8 or not digits.isdigit():
+            raise ValueError(f"setup code must be 8 digits, got {self.setup_code!r}")
+        if len(formatted) != 10 or formatted[3] != "-" or formatted[6] != "-":
+            raise ValueError(f"setup code must be XXX-XX-XXX, got {formatted!r}")
+        pincode = formatted.encode("ascii")
+
+        lan_ip = self.config.advertised_address or self._ip
+
+        # macOS: asyncio server on host="::" ends up IPv6-only in practice
+        # (IPv4 connect → ECONNREFUSED) while mDNS still advertises the IPv4
+        # A-record. Home.app then marks the accessory "Not Reachable".
+        # Bind IPv4 explicitly. Homebridge does the same on single-stack LANs.
         driver = AccessoryDriver(
             port=self.config.port,
             persist_file=str(self._persist_path),
-            advertised_address=self.config.advertised_address or self._ip,
-            address=self._ip,
+            address=lan_ip,
+            advertised_address=lan_ip,
+            listen_address="0.0.0.0",
+            pincode=pincode,
         )
 
-        accessory = AgentBridgeAccessory(driver, "HomePod Agent")
-        driver.add_accessory(accessory=accessory)
-        self._driver = driver
-        self._accessory = accessory
+        # Real pyhap Bridge (not Accessory with category=BRIDGE). Empty
+        # "bridge-category" accessories confuse Home.app; a Bridge with at
+        # least one child is what HAP-NodeJS / Homebridge advertise.
+        bridge = Bridge(driver, "HomePod Agent")
+        bridge.set_info_service(
+            manufacturer=MANUFACTURER,
+            model=MODEL,
+            serial_number="HPAGT-001",
+            firmware_revision=FIRMWARE_REVISION,
+        )
 
-        # Drive pyhap's blocking loop on a thread so we don't block the event loop.
+        class AgentSwitch(Accessory):
+            """Minimal always-on Switch so the bridge has a real child AID."""
+
+            category = CATEGORY_SWITCH
+
+            def __init__(self, drv: Any, display_name: str) -> None:
+                super().__init__(drv, display_name)
+                service = self.add_preload_service("Switch")
+                self.char_on = service.configure_char("On", value=False)
+
+        bridge.add_accessory(AgentSwitch(driver, "Agent"))
+
+        # Xiaomi air purifiers + Dreame vacuums from devices.yaml
+        self._device_accessories: dict[str, Any] = {}
+        self._device_manager = None
+        loop = asyncio.get_running_loop()
+        try:
+            from devices.homekit_acc import add_device_accessories
+            from devices.manager import DeviceManager
+            from devices.models import DeviceCommand
+
+            mgr = DeviceManager()
+            mgr.reload()
+            try:
+                await mgr.refresh_all()
+            except Exception as e:
+                log.warning("bridge.devices_seed_fail", error=str(e))
+
+            def _run_cmd(device_id: str, action: str, args: dict) -> None:
+                async def _go() -> None:
+                    await mgr.run_command(
+                        DeviceCommand(device_id=device_id, action=action, args=args or {})
+                    )
+
+                try:
+                    running = asyncio.get_running_loop()
+                    running.create_task(_go())
+                except RuntimeError:
+                    asyncio.run_coroutine_threadsafe(_go(), loop)
+
+            accs = add_device_accessories(
+                bridge,
+                driver,
+                get_snapshots=mgr.list_snapshots,
+                run_command=_run_cmd,
+            )
+            self._device_accessories = accs
+            self._device_manager = mgr
+            log.info("bridge.devices_attached", count=len(accs))
+        except Exception as e:
+            log.warning("bridge.devices_skip", error=str(e))
+
+        driver.add_accessory(accessory=bridge)
+
+        self._driver = driver
+        self._accessory = bridge
+
+        # Do NOT monkey-patch SRP. HAP pair-setup uses a random 16-byte salt
+        # from the accessory (sent in M2). The mDNS `sh` field is only the
+        # setup-hash for QR payloads — it is NOT the SRP salt. Earlier
+        # patches that forced salt=sh broke/confused pairing.
+        #
+        # setup_id stays pyhap's random 4-char id; Home.app manual entry only
+        # needs the pincode to match state.pincode.
+        log.info(
+            "bridge.pyhap_ready",
+            pincode=formatted,
+            setup_code=self.setup_code,
+            setup_id=driver.state.setup_id,
+            mac=driver.state.mac,
+            listen="0.0.0.0",
+            advertise=lan_ip,
+            port=self.config.port,
+            children=list(bridge.accessories.keys()),
+            srp_pincode_repr=repr(driver.state.pincode),
+        )
+
+        # Drive pyhap's blocking loop on a thread so we don't block asyncio.
         await asyncio.to_thread(driver.start)
 
     async def _start_stub(self) -> None:
@@ -382,40 +496,30 @@ try:
     from pyhap.accessory import Accessory as _HapAccessory
     from pyhap.characteristic import Characteristic
     from pyhap.const import CATEGORY_BRIDGE
-    from pyhap.service import Service as _HapService
 
     class AgentBridgeAccessory(_HapAccessory):
         """The HAP accessory the iPhone pairs with.
 
-        Exposes a single service with a few characteristics that other
-        HomeKit automations can use to invoke the agent:
-          - Agent.TriggerPhrase : a String that the user can set
-          - Agent.LastResult    : a String shown after the last action
-          - Agent.Version       : firmware version (read-only)
+        Exposes itself as a HomeKit bridge. The iPhone pairs with this bridge
+        and (in theory) every HomeKit accessory on the LAN becomes reachable
+        through it. v0.1 just advertises the standard info service; custom
+        agent-control characteristics can come later when we add iPhone-side
+        automation triggers.
         """
 
         category = CATEGORY_BRIDGE
 
         def __init__(self, driver: Any, name: str) -> None:
             super().__init__(driver, name)
-            # Default service — every accessory must have AccessoryInformation.
-            info = self.preorder_service(_HapService("AccessoryInformation"))
-            info.configure_char("Manufacturer", MANUFACTURER)
-            info.configure_char("Model", MODEL)
-            info.configure_char("FirmwareRevision", FIRMWARE_REVISION)
-            info.configure_char("SerialNumber", "HPAGT-001")
 
-            # Agent service — non-standard, but valid as long as we declare
-            # our own characteristics. HAP clients will see this as an
-            # "unknown service" but it works for our automation triggers.
-            agent = self.add_preorder_service("Agent.TriggerService")
-            self.phrase_char = agent.configure_char(
-                "Agent.TriggerPhrase", value="hello agent", properties=["writable"]
+            # Standard info service (name, model, etc.).
+            self.set_info_service(
+                manufacturer=MANUFACTURER,
+                model=MODEL,
+                serial_number="HPAGT-001",
+                firmware_revision=FIRMWARE_REVISION,
             )
-            self.result_char = agent.configure_char(
-                "Agent.LastResult", value="(none yet)", properties=["writable"]
-            )
-            agent.configure_char("Agent.Version", value=FIRMWARE_REVISION)
+
 
 except ImportError:
     # pyhap not installed — the bridge falls back to stub mode.

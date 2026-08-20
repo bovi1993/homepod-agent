@@ -19,7 +19,7 @@ FIRMWARE_REVISION = "0.1.0"
 
 # Setup code prefix; pyhap builds the full code from this base.
 # Override with --setup-code on the CLI for a stable, recoverable code.
-DEFAULT_SETUP_CODE_PREFIX = "528"
+DEFAULT_SETUP_CODE_PREFIX = "52823145"
 
 # Pairing persistence file under state dir.
 PAIRING_FILE = "pairing.json"

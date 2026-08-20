@@ -79,13 +79,25 @@ def local_ip() -> str:
 
 
 async def run_pair(args: argparse.Namespace) -> int:
-    code_prefix = args.setup_code.replace("-", "")[:8]
+    code_prefix = args.setup_code.replace("-", "")
+    if len(code_prefix) == 7:
+        code_prefix = code_prefix + "0"
     config = BridgeConfig(setup_code_prefix=code_prefix)
     bridge = HomeKitBridge(config)
 
-    print_setup_code(bridge.setup_code, local_ip())
+    # Show the user the actual 8-digit code they'll need to type.
+    display = f"{code_prefix[0:3]}-{code_prefix[3:5]}-{code_prefix[5:8]}"
+    print_setup_code(display, local_ip())
 
-    await bridge.start()
+    # Boot the HAP driver and its ad-hoc event loop in a thread. We do NOT
+    # start the heartbeat task — pyhap runs its own loop, and we only need
+    # to wait for pairing to complete.
+    try:
+        await bridge.start_hap_only()
+    except Exception as e:
+        log.error("pair.start_failed", error=str(e))
+        await bridge.stop()
+        return 1
 
     paired = await wait_for_pairing(bridge, timeout_s=args.timeout)
     if paired:
@@ -97,6 +109,7 @@ async def run_pair(args: argparse.Namespace) -> int:
         print(f" Pairing config saved to: {state_dir() / 'pairing.json'}")
         print()
         print(" Next step: run `make run` to start all services.")
+        await bridge.stop()
         return 0
 
     print()
@@ -108,7 +121,11 @@ async def run_pair(args: argparse.Namespace) -> int:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Pair homepod-agent with your HomeKit home")
-    p.add_argument("--setup-code", default="528-23-142", help="8-digit setup code prefix (default: 528-23-142)")
+    p.add_argument(
+        "--setup-code",
+        default="528-23-145",
+        help="7- or 8-digit setup code (last digit auto-computed if 7)",
+    )
     p.add_argument("--timeout", type=float, default=60.0, help="Seconds to wait for pairing")
     p.add_argument("--state-dir", default=None, help="Override state dir")
     args = p.parse_args()

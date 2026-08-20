@@ -31,6 +31,7 @@ AGENT_PORT      ?= 8000
 HOMEKIT_PORT    ?= 51826
 VOICE_OUT_PORT  ?= 8765
 CAMERAS_PORT    ?= 8001
+DEVICES_PORT    ?= 8002
 DASHBOARD_PORT  ?= 3000
 
 # ---- helpers ------------------------------------------------------------- ----
@@ -110,6 +111,7 @@ run: state-dirs
 	@echo "Booting homepod-agent..."
 	@echo "  Agent:       http://localhost:$(AGENT_PORT)"
 	@echo "  HomeKit:     HAP socket on :$(HOMEKIT_PORT)"
+	@echo "  Devices:    http://localhost:$(DEVICES_PORT)"
 	@echo "  Cameras:     http://localhost:$(CAMERAS_PORT)"
 	@echo "  Voice:       ws://localhost:$(VOICE_OUT_PORT)"
 	@echo "  Dashboard:   http://localhost:$(DASHBOARD_PORT)"
@@ -120,6 +122,7 @@ run: state-dirs
 	mkdir -p $(LOG_DIR)
 	cd $(AGENT_DIR) && $(PIP) run python -m llm.main > $(LOG_DIR)/llm.log 2>&1 & echo $$! > $(PID_DIR)/llm.pid
 	cd $(AGENT_DIR) && $(PIP) run python -m homekit.daemon > $(LOG_DIR)/homekit.log 2>&1 & echo $$! > $(PID_DIR)/homekit.pid
+	cd $(AGENT_DIR) && PYTHONPATH=. $(PIP) run python -m devices serve --host 0.0.0.0 --port $(DEVICES_PORT) > $(LOG_DIR)/devices.log 2>&1 & echo $$! > $(PID_DIR)/devices.pid
 	cd $(AGENT_DIR) && $(PIP) run python -m voice.main > $(LOG_DIR)/voice.log 2>&1 & echo $$! > $(PID_DIR)/voice.pid
 	cd $(AGENT_DIR) && $(PIP) run python -m cameras.proxy > $(LOG_DIR)/cameras.log 2>&1 & echo $$! > $(PID_DIR)/cameras.pid
 	cd $(DASH_DIR) && $(NPM) run dev > $(LOG_DIR)/dashboard.log 2>&1 & echo $$! > $(PID_DIR)/dashboard.pid

@@ -159,6 +159,67 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_devices",
+            "description": (
+                "List Xiaomi/Dreame devices (air purifiers, robot vacuums) and their "
+                "live state (AQI, power, battery, cleaning status)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["air_purifier", "vacuum"],
+                        "description": "Optional filter.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_air_purifier",
+            "description": "Turn a Xiaomi air purifier on/off, or set mode/fan level.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_or_name": {"type": "string"},
+                    "on": {"type": "boolean"},
+                    "mode": {
+                        "type": "string",
+                        "description": "e.g. Auto, Sleep, Favorite, Manual",
+                    },
+                    "fan_level": {"type": "integer", "minimum": 1, "maximum": 3},
+                },
+                "required": ["id_or_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "control_vacuum",
+            "description": (
+                "Control a Dreame (Dreamehome) robot vacuum: start cleaning, stop, "
+                "or send it back to the dock."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_or_name": {"type": "string"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["start", "stop", "home", "locate"],
+                    },
+                },
+                "required": ["id_or_name", "action"],
+            },
+        },
+    },
 ]
 
 
@@ -171,6 +232,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 class ToolContext:
     homekit_url: str = HOMEKIT_URL
     voice_url: str = "http://127.0.0.1:8765"
+    devices_url: str = "http://127.0.0.1:8002"
     http: httpx.AsyncClient | None = None
 
     def client(self) -> httpx.AsyncClient:
@@ -339,6 +401,97 @@ async def tool_search_history(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
         return ToolResult(ok=False, error=str(e))
 
 
+async def _find_device(ctx: ToolContext, name_or_id: str) -> dict[str, Any] | None:
+    async with ctx.client() as c:
+        r = await c.get(f"{ctx.devices_url}/devices")
+        r.raise_for_status()
+        items = r.json().get("data") or []
+    for it in items:
+        if str(it.get("id")) == str(name_or_id):
+            return it
+    target = name_or_id.lower()
+    for it in items:
+        if (it.get("name") or "").lower() == target:
+            return it
+    for it in items:
+        if target in (it.get("name") or "").lower() or target in str(it.get("id", "")).lower():
+            return it
+    return None
+
+
+async def tool_list_devices(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        async with ctx.client() as c:
+            r = await c.get(f"{ctx.devices_url}/devices")
+            r.raise_for_status()
+        items = r.json().get("data") or []
+        kind = args.get("kind")
+        if kind:
+            items = [i for i in items if i.get("kind") == kind]
+        return ToolResult(ok=True, data=items)
+    except Exception as e:
+        return ToolResult(ok=False, error=str(e))
+
+
+async def tool_set_air_purifier(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        item = await _find_device(ctx, args["id_or_name"])
+        if not item:
+            return ToolResult(ok=False, error=f"device not found: {args['id_or_name']}")
+        did = item["id"]
+        results = []
+        async with ctx.client() as c:
+            if "on" in args:
+                action = "on" if args["on"] else "off"
+                r = await c.post(
+                    f"{ctx.devices_url}/devices/{did}/command",
+                    json={"action": action, "args": {}},
+                )
+                r.raise_for_status()
+                results.append(r.json())
+            if args.get("mode"):
+                r = await c.post(
+                    f"{ctx.devices_url}/devices/{did}/command",
+                    json={"action": "set_mode", "args": {"mode": args["mode"]}},
+                )
+                r.raise_for_status()
+                results.append(r.json())
+            if args.get("fan_level") is not None:
+                r = await c.post(
+                    f"{ctx.devices_url}/devices/{did}/command",
+                    json={
+                        "action": "set_fan_level",
+                        "args": {"level": args["fan_level"]},
+                    },
+                )
+                r.raise_for_status()
+                results.append(r.json())
+        if not results:
+            return ToolResult(ok=False, error="nothing to do — pass on, mode, or fan_level")
+        return ToolResult(ok=True, data={"id": did, "results": results})
+    except Exception as e:
+        return ToolResult(ok=False, error=str(e))
+
+
+async def tool_control_vacuum(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        item = await _find_device(ctx, args["id_or_name"])
+        if not item:
+            return ToolResult(ok=False, error=f"device not found: {args['id_or_name']}")
+        did = item["id"]
+        action = args["action"]
+        async with ctx.client() as c:
+            r = await c.post(
+                f"{ctx.devices_url}/devices/{did}/command",
+                json={"action": action, "args": {}},
+            )
+            r.raise_for_status()
+            body = r.json()
+        return ToolResult(ok=bool(body.get("ok", True)), data=body.get("data"), error=body.get("error"))
+    except Exception as e:
+        return ToolResult(ok=False, error=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -352,6 +505,9 @@ HANDLERS: dict[str, Callable[..., Any]] = {
     "trigger_scene": tool_trigger_scene,
     "speak_to_homepod": tool_speak_to_homepod,
     "search_history": tool_search_history,
+    "list_devices": tool_list_devices,
+    "set_air_purifier": tool_set_air_purifier,
+    "control_vacuum": tool_control_vacuum,
 }
 
 

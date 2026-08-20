@@ -30,11 +30,14 @@ class AccessoryKind(str, Enum):
     SPEAKER = "speaker"
     TV = "tv"
     CAMERA = "camera"
+    AIR_PURIFIER = "air_purifier"
+    VACUUM = "vacuum"
     SENSOR_MOTION = "sensor_motion"
     SENSOR_CONTACT = "sensor_contact"
     SENSOR_TEMPERATURE = "sensor_temperature"
     SENSOR_HUMIDITY = "sensor_humidity"
     SENSOR_LIGHT = "sensor_light"
+    SENSOR_AIR_QUALITY = "sensor_air_quality"
     UNKNOWN = "unknown"
 
 

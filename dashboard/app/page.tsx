@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import useSWR from "swr";
-import { Activity, Camera, Home as HomeIcon, MessageCircle, Settings } from "lucide-react";
+import { Activity, Camera, Home as HomeIcon, MessageCircle, Settings, Wind } from "lucide-react";
 
 const fetcher = (url: string) =>
   fetch(url).then((r) => {
@@ -23,6 +23,23 @@ interface Accessory {
   locked?: boolean | null;
 }
 
+interface DeviceSnap {
+  id: string;
+  name: string;
+  kind: string;
+  room: string;
+  reachable: boolean;
+  on?: boolean | null;
+  aqi?: number | null;
+  mode?: string | null;
+  battery_level?: number | null;
+  status?: string | null;
+  cleaning?: boolean | null;
+  charging?: boolean | null;
+  filter_life_remaining?: number | null;
+  error?: string | null;
+}
+
 interface Snapshot {
   home_id: string;
   name: string;
@@ -36,6 +53,11 @@ export default function Page() {
     fetcher,
     { refreshInterval: 5000 }
   );
+  const { data: devData } = useSWR<{ ok: boolean; data: DeviceSnap[] }>(
+    "/api/devices/devices",
+    fetcher,
+    { refreshInterval: 10000 }
+  );
   const [ws, setWs] = useState<WebSocket | null>(null);
 
   useEffect(() => {
@@ -48,6 +70,7 @@ export default function Page() {
 
   const snap = data?.data;
   const accessories = snap?.accessories ?? [];
+  const devices = devData?.data ?? [];
   const rooms = Array.from(new Set(accessories.map((a) => a.room)));
 
   return (
@@ -74,6 +97,20 @@ export default function Page() {
       )}
 
       {isLoading && <p className="text-muted-foreground">Loading home…</p>}
+
+      {devices.length > 0 && (
+        <section className="mb-8">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-medium">
+            <Wind size={18} />
+            Xiaomi / Dreame · {devices.length}
+          </h2>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {devices.map((d) => (
+              <DeviceTile key={d.id} d={d} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {snap && (
         <div className="space-y-8">
@@ -165,6 +202,56 @@ function AccessoryTile({ a }: { a: Accessory }) {
         <div className="mt-3 flex items-center justify-between text-sm">
           <span className="text-muted-foreground">Temp</span>
           <span>{a.temperature.toFixed(1)}°C</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeviceTile({ d }: { d: DeviceSnap }) {
+  const dot = !d.reachable
+    ? "bg-red-400"
+    : d.cleaning
+      ? "bg-blue-500"
+      : d.on
+        ? "bg-green-500"
+        : "bg-gray-400";
+  let status = "—";
+  if (!d.reachable) status = d.error ? "Down" : "Offline";
+  else if (d.kind === "vacuum") {
+    status = d.cleaning ? "Cleaning" : d.charging ? "Docked" : d.status || "Idle";
+  } else if (d.kind === "air_purifier") {
+    status = d.on ? `On · AQI ${d.aqi ?? "—"}` : "Off";
+  }
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="flex items-center gap-2">
+        <span className={`inline-block h-2.5 w-2.5 rounded-full ${dot}`} />
+        <span className="text-sm font-medium">{d.name}</span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {d.kind} · {d.room}
+      </p>
+      <div className="mt-3 flex items-center justify-between text-sm">
+        <span className="text-muted-foreground">Status</span>
+        <span className="text-right">{status}</span>
+      </div>
+      {d.battery_level != null && (
+        <div className="mt-2 flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">Battery</span>
+          <span>{d.battery_level}%</span>
+        </div>
+      )}
+      {d.filter_life_remaining != null && (
+        <div className="mt-2 flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">Filter</span>
+          <span>{d.filter_life_remaining}%</span>
+        </div>
+      )}
+      {d.mode && (
+        <div className="mt-2 flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">Mode</span>
+          <span>{d.mode}</span>
         </div>
       )}
     </div>

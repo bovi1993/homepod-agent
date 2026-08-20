@@ -11,6 +11,7 @@ agent that lives on your Mac.
 - **Speaks through HomePod** — AirPlay 2 streams TTS responses to a HomePod in your chosen room
 - **Listens through an iPad** — always-on iPad captures speech, runs ASR, sends transcripts to the agent
 - **Routes between local and hosted LLMs** — small local model for routine; Claude or GPT for complex reasoning
+- **Controls Xiaomi air purifiers + Dreame vacuums** — local miio via tokens from Xiaomi/Dreamehome cloud (`docs/devices.md`)
 - **Shows everything on a dashboard** — Next.js UI with device grid, camera feeds, chat panel, automation editor
 
 ## Architecture

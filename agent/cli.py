@@ -75,6 +75,16 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_devices(args: argparse.Namespace) -> int:
+    """Delegate to devices package CLI (cloud-sync, status, cmd, serve, …)."""
+    from devices.__main__ import main as devices_main
+
+    rest = list(args.devices_argv or [])
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return devices_main(rest)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="homepod-agent", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -98,6 +108,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_disc = sub.add_parser("discover", help="ONVIF camera discovery")
     p_disc.add_argument("--timeout", type=float, default=4.0)
     p_disc.set_defaults(func=cmd_discover)
+
+    p_dev = sub.add_parser(
+        "devices",
+        help="Xiaomi air purifier + Dreame vacuum (cloud-sync, status, cmd, serve)",
+    )
+    p_dev.add_argument(
+        "devices_argv",
+        nargs=argparse.REMAINDER,
+        help="passed to devices CLI; try: cloud-sync | status | discover | serve",
+    )
+    p_dev.set_defaults(func=cmd_devices)
 
     return p
 
