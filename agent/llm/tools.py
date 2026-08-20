@@ -236,17 +236,18 @@ class ToolContext:
     http: httpx.AsyncClient | None = None
 
     def client(self) -> httpx.AsyncClient:
-        if self.http is None:
+        # Do not `async with` this — closing would kill the shared session.
+        if self.http is None or self.http.is_closed:
             self.http = httpx.AsyncClient(timeout=30.0)
         return self.http
 
 
 async def _find_by_name(ctx: ToolContext, name_or_id: str) -> dict[str, Any] | None:
     """Resolve an accessory by name (case-insensitive) or id."""
-    async with ctx.client() as c:
-        r = await c.get(f"{ctx.homekit_url}/accessories")
-        r.raise_for_status()
-        data = r.json()
+    c = ctx.client()
+    r = await c.get(f"{ctx.homekit_url}/accessories")
+    r.raise_for_status()
+    data = r.json()
     items = (data.get("data") or [])
     # try exact id first
     for it in items:
@@ -266,9 +267,9 @@ async def _find_by_name(ctx: ToolContext, name_or_id: str) -> dict[str, Any] | N
 
 async def tool_list_accessories(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
-        async with ctx.client() as c:
-            r = await c.get(f"{ctx.homekit_url}/accessories")
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.get(f"{ctx.homekit_url}/accessories")
+        r.raise_for_status()
         items = r.json().get("data") or []
         kind = args.get("kind")
         room = args.get("room")
@@ -298,22 +299,22 @@ async def tool_set_light(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         if not item:
             return ToolResult(ok=False, error=f"accessory not found: {args['id_or_name']}")
         aid = item["id"]
-        async with ctx.client() as c:
-            r = await c.post(
+        c = ctx.client()
+        r = await c.post(
+            f"{ctx.homekit_url}/command",
+            json={"target_id": aid, "action": "set_on", "args": {"value": args["on"]}},
+        )
+        r.raise_for_status()
+        if args.get("brightness") is not None:
+            r2 = await c.post(
                 f"{ctx.homekit_url}/command",
-                json={"target_id": aid, "action": "set_on", "args": {"value": args["on"]}},
+                json={
+                    "target_id": aid,
+                    "action": "set_brightness",
+                    "args": {"value": args["brightness"]},
+                },
             )
-            r.raise_for_status()
-            if args.get("brightness") is not None:
-                r2 = await c.post(
-                    f"{ctx.homekit_url}/command",
-                    json={
-                        "target_id": aid,
-                        "action": "set_brightness",
-                        "args": {"value": args["brightness"]},
-                    },
-                )
-                r2.raise_for_status()
+            r2.raise_for_status()
         return ToolResult(ok=True, data={"id": aid, "on": args["on"], "brightness": args.get("brightness")})
     except Exception as e:
         return ToolResult(ok=False, error=str(e))
@@ -324,16 +325,16 @@ async def tool_set_thermostat(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
         item = await _find_by_name(ctx, args["id_or_name"])
         if not item:
             return ToolResult(ok=False, error=f"accessory not found: {args['id_or_name']}")
-        async with ctx.client() as c:
-            r = await c.post(
-                f"{ctx.homekit_url}/command",
-                json={
-                    "target_id": item["id"],
-                    "action": "set_target_temperature",
-                    "args": {"value": args["target_celsius"]},
-                },
-            )
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.post(
+            f"{ctx.homekit_url}/command",
+            json={
+                "target_id": item["id"],
+                "action": "set_target_temperature",
+                "args": {"value": args["target_celsius"]},
+            },
+        )
+        r.raise_for_status()
         return ToolResult(ok=True, data={"id": item["id"], "target_celsius": args["target_celsius"]})
     except Exception as e:
         return ToolResult(ok=False, error=str(e))
@@ -344,16 +345,16 @@ async def tool_set_lock(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         item = await _find_by_name(ctx, args["id_or_name"])
         if not item:
             return ToolResult(ok=False, error=f"accessory not found: {args['id_or_name']}")
-        async with ctx.client() as c:
-            r = await c.post(
-                f"{ctx.homekit_url}/command",
-                json={
-                    "target_id": item["id"],
-                    "action": "set_lock",
-                    "args": {"value": args["locked"]},
-                },
-            )
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.post(
+            f"{ctx.homekit_url}/command",
+            json={
+                "target_id": item["id"],
+                "action": "set_lock",
+                "args": {"value": args["locked"]},
+            },
+        )
+        r.raise_for_status()
         return ToolResult(ok=True, data={"id": item["id"], "locked": args["locked"]})
     except Exception as e:
         return ToolResult(ok=False, error=str(e))
@@ -361,9 +362,9 @@ async def tool_set_lock(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 async def tool_trigger_scene(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
-        async with ctx.client() as c:
-            r = await c.post(f"{ctx.homekit_url}/scene", json={"name": args["name"]})
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.post(f"{ctx.homekit_url}/scene", json={"name": args["name"]})
+        r.raise_for_status()
         return ToolResult(ok=True, data={"triggered": args["name"]})
     except Exception as e:
         return ToolResult(ok=False, error=str(e))
@@ -372,13 +373,13 @@ async def tool_trigger_scene(ctx: ToolContext, args: dict[str, Any]) -> ToolResu
 async def tool_speak_to_homepod(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Tell the voice bridge to TTS the text on the chosen HomePod."""
     try:
-        async with ctx.client() as c:
-            r = await c.post(
-                f"{ctx.voice_url}/tts",
-                json={"text": args["text"], "home_pod_room": args.get("room")},
-                timeout=10.0,
-            )
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.post(
+            f"{ctx.voice_url}/tts",
+            json={"text": args["text"], "home_pod_room": args.get("room")},
+            timeout=10.0,
+        )
+        r.raise_for_status()
         return ToolResult(ok=True, data={"spoke": args["text"]})
     except Exception as e:
         return ToolResult(ok=False, error=str(e))
@@ -393,19 +394,19 @@ async def tool_search_history(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
             if not item:
                 return ToolResult(ok=False, error=f"accessory not found: {name_or_id}")
             params["accessory_id"] = item["id"]
-        async with ctx.client() as c:
-            r = await c.get(f"{ctx.homekit_url}/history", params=params)
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.get(f"{ctx.homekit_url}/history", params=params)
+        r.raise_for_status()
         return ToolResult(ok=True, data=r.json().get("data"))
     except Exception as e:
         return ToolResult(ok=False, error=str(e))
 
 
 async def _find_device(ctx: ToolContext, name_or_id: str) -> dict[str, Any] | None:
-    async with ctx.client() as c:
-        r = await c.get(f"{ctx.devices_url}/devices")
-        r.raise_for_status()
-        items = r.json().get("data") or []
+    c = ctx.client()
+    r = await c.get(f"{ctx.devices_url}/devices")
+    r.raise_for_status()
+    items = r.json().get("data") or []
     for it in items:
         if str(it.get("id")) == str(name_or_id):
             return it
@@ -421,9 +422,9 @@ async def _find_device(ctx: ToolContext, name_or_id: str) -> dict[str, Any] | No
 
 async def tool_list_devices(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
-        async with ctx.client() as c:
-            r = await c.get(f"{ctx.devices_url}/devices")
-            r.raise_for_status()
+        c = ctx.client()
+        r = await c.get(f"{ctx.devices_url}/devices")
+        r.raise_for_status()
         items = r.json().get("data") or []
         kind = args.get("kind")
         if kind:
@@ -440,32 +441,32 @@ async def tool_set_air_purifier(ctx: ToolContext, args: dict[str, Any]) -> ToolR
             return ToolResult(ok=False, error=f"device not found: {args['id_or_name']}")
         did = item["id"]
         results = []
-        async with ctx.client() as c:
-            if "on" in args:
-                action = "on" if args["on"] else "off"
-                r = await c.post(
-                    f"{ctx.devices_url}/devices/{did}/command",
-                    json={"action": action, "args": {}},
-                )
-                r.raise_for_status()
-                results.append(r.json())
-            if args.get("mode"):
-                r = await c.post(
-                    f"{ctx.devices_url}/devices/{did}/command",
-                    json={"action": "set_mode", "args": {"mode": args["mode"]}},
-                )
-                r.raise_for_status()
-                results.append(r.json())
-            if args.get("fan_level") is not None:
-                r = await c.post(
-                    f"{ctx.devices_url}/devices/{did}/command",
-                    json={
-                        "action": "set_fan_level",
-                        "args": {"level": args["fan_level"]},
-                    },
-                )
-                r.raise_for_status()
-                results.append(r.json())
+        c = ctx.client()
+        if "on" in args:
+            action = "on" if args["on"] else "off"
+            r = await c.post(
+                f"{ctx.devices_url}/devices/{did}/command",
+                json={"action": action, "args": {}},
+            )
+            r.raise_for_status()
+            results.append(r.json())
+        if args.get("mode"):
+            r = await c.post(
+                f"{ctx.devices_url}/devices/{did}/command",
+                json={"action": "set_mode", "args": {"mode": args["mode"]}},
+            )
+            r.raise_for_status()
+            results.append(r.json())
+        if args.get("fan_level") is not None:
+            r = await c.post(
+                f"{ctx.devices_url}/devices/{did}/command",
+                json={
+                    "action": "set_fan_level",
+                    "args": {"level": args["fan_level"]},
+                },
+            )
+            r.raise_for_status()
+            results.append(r.json())
         if not results:
             return ToolResult(ok=False, error="nothing to do — pass on, mode, or fan_level")
         return ToolResult(ok=True, data={"id": did, "results": results})
@@ -480,13 +481,13 @@ async def tool_control_vacuum(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
             return ToolResult(ok=False, error=f"device not found: {args['id_or_name']}")
         did = item["id"]
         action = args["action"]
-        async with ctx.client() as c:
-            r = await c.post(
-                f"{ctx.devices_url}/devices/{did}/command",
-                json={"action": action, "args": {}},
-            )
-            r.raise_for_status()
-            body = r.json()
+        c = ctx.client()
+        r = await c.post(
+            f"{ctx.devices_url}/devices/{did}/command",
+            json={"action": action, "args": {}},
+        )
+        r.raise_for_status()
+        body = r.json()
         return ToolResult(ok=bool(body.get("ok", True)), data=body.get("data"), error=body.get("error"))
     except Exception as e:
         return ToolResult(ok=False, error=str(e))

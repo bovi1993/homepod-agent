@@ -110,11 +110,16 @@ class AirPurifierDriver:
 
     def command(self, action: str, args: dict[str, Any]) -> DeviceSnapshot:
         dev = self._client()
-        action = action.lower()
+        action = action.lower().strip()
+        # Normalize common aliases from dashboard / LLM
+        if action in ("turn_on", "power_on", "enable"):
+            action = "on"
+        elif action in ("turn_off", "power_off", "disable"):
+            action = "off"
         try:
-            if action in ("on", "set_on") and args.get("value", True):
+            if action == "on":
                 dev.on()
-            elif action in ("off", "set_on") and not args.get("value", False):
+            elif action == "off":
                 dev.off()
             elif action == "set_on":
                 if args.get("value"):
@@ -123,11 +128,8 @@ class AirPurifierDriver:
                     dev.off()
             elif action == "set_mode":
                 mode = args.get("mode") or args.get("value")
-                from miio import AirPurifierMiot
-
                 # Enum handling differs per class — pass through string upper
                 if hasattr(dev, "set_mode"):
-                    # try common OperationMode enums
                     try:
                         from miio.integrations.airpurifier.zhimi.airpurifier_miot import (
                             OperationMode,

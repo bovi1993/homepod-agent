@@ -112,13 +112,15 @@ export function DeviceTile({
 
   const primaryAction = (): string | null => {
     if (d.source === "homekit") return null; // read-only until HK control API
-    if (d.kind.includes("purifier") || d.kind === "air_purifier") {
-      return d.on ? "turn_off" : "turn_on";
+    const kind = (d.kind || "").toLowerCase();
+    if (kind.includes("purifier")) {
+      // drivers accept on/off (and turn_on/turn_off aliases)
+      return d.on ? "off" : "on";
     }
-    if (d.kind === "vacuum" || d.kind.includes("vacuum")) {
+    if (kind.includes("vacuum")) {
       return d.cleaning ? "stop" : "start";
     }
-    if (d.on != null) return d.on ? "turn_off" : "turn_on";
+    if (d.on != null) return d.on ? "off" : "on";
     return null;
   };
 

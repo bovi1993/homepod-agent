@@ -82,8 +82,9 @@ export default function Page() {
   } = useSWR<{ ok: boolean; data: DeviceSnap[] }>("/api/devices/devices", fetcher, {
     refreshInterval: 8000,
   });
-  const { data: health } = useSWR("/api/agent/health", fetcher, {
+  const { data: health, error: healthError } = useSWR("/api/agent/health", fetcher, {
     refreshInterval: 15000,
+    shouldRetryOnError: true,
   });
 
   const [live, setLive] = useState(false);
@@ -174,13 +175,27 @@ export default function Page() {
     setSceneBusy(id);
     try {
       if (id === "clean" && vacuum) {
-        await sendDeviceCommand(vacuum.id, vacuum.cleaning ? "stop" : "start");
+        const action = vacuum.cleaning ? "stop" : "start";
+        const res = await sendDeviceCommand(vacuum.id, action);
         mutDev();
-        flash(vacuum.cleaning ? "Vacuum stopped" : "Vacuum started");
+        flash(
+          res.ok
+            ? vacuum.cleaning
+              ? "Vacuum stopped"
+              : "Vacuum started"
+            : res.error || "Vacuum command failed"
+        );
       } else if (id === "air" && purifier) {
-        await sendDeviceCommand(purifier.id, purifier.on ? "turn_off" : "turn_on");
+        const action = purifier.on ? "off" : "on";
+        const res = await sendDeviceCommand(purifier.id, action);
         mutDev();
-        flash(purifier.on ? "Purifier off" : "Purifier on");
+        flash(
+          res.ok
+            ? purifier.on
+              ? "Purifier off"
+              : "Purifier on"
+            : res.error || "Purifier command failed"
+        );
       } else if (id === "away" || id === "night" || id === "home") {
         // Route through agent chat API as natural language scene
         const prompts: Record<string, string> = {
@@ -188,12 +203,17 @@ export default function Page() {
           night: "Run night scene: lights off or dim, ensure vacuum is docked, status summary",
           home: "I'm home: stop vacuum if cleaning near doors, status summary of air and locks",
         };
-        await fetch("/api/agent/chat", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ user: prompts[id] }),
-        }).catch(() => null);
-        flash(`Scene “${id}” sent to agent`);
+        try {
+          const r = await fetch("/api/agent/chat", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ user: prompts[id] }),
+          });
+          if (!r.ok) throw new Error(`${r.status}`);
+          flash(`Scene “${id}” sent to agent`);
+        } catch (e) {
+          flash(`Scene “${id}” failed: ${String(e)}`);
+        }
       } else {
         flash("Scene needs a linked device — add via cloud-sync");
       }
@@ -202,7 +222,8 @@ export default function Page() {
     }
   }
 
-  const agentOk = health?.ok !== false && !health?.error;
+  const agentOk =
+    !healthError && health != null && health.ok !== false && !health.error;
 
   return (
     <Shell

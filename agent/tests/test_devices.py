@@ -70,3 +70,44 @@ def test_upsert_and_roundtrip(tmp_path: Path) -> None:
     cfg2 = upsert_device(loaded, d2)
     # same id match
     assert len(cfg2.devices) == 1
+
+
+def test_purifier_action_aliases() -> None:
+    from devices.drivers import AirPurifierDriver
+    from devices.models import DeviceConfig, DeviceKind
+
+    class FakeDev:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def on(self) -> None:
+            self.calls.append("on")
+
+        def off(self) -> None:
+            self.calls.append("off")
+
+        def status(self) -> object:
+            class S:
+                is_on = True
+                aqi = 1
+                mode = None
+                humidity = None
+                temperature = None
+                fan_level = None
+                filter_life_remaining = 50
+
+            return S()
+
+    cfg = DeviceConfig(
+        id="ap-t",
+        name="T",
+        kind=DeviceKind.AIR_PURIFIER,
+        ip="1.1.1.1",
+        token="a" * 32,
+    )
+    d = AirPurifierDriver(cfg)
+    fake = FakeDev()
+    d._dev = fake
+    assert d.command("turn_on", {}).error is None
+    assert d.command("turn_off", {}).error is None
+    assert fake.calls == ["on", "off"]
