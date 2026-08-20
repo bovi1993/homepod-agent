@@ -1,0 +1,81 @@
+[project]
+name = "homepod-agent"
+version = "0.1.0"
+description = "Local-first home automation: HomeKit + LLM agent + HomePod speaker + iPad mic"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "bovi1993"},
+]
+dependencies = [
+    # HomeKit
+    "pyhap>=1.4.0",
+    "aiohomekit>=1.0.0",
+    # LLM
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.6.0",
+    "httpx>=0.27.0",
+    "anthropic>=0.20.0",
+    "openai>=1.10.0",
+    # Voice
+    "pyatv>=0.14.0",
+    "zeroconf>=0.131.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26.0",
+    "websockets>=12.0",
+    # Cameras
+    "onvif-zeep>=0.2.12",
+    "opencv-python>=4.9.0",
+    # Storage
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.19.0",
+    "pyyaml>=6.0",
+    # Logging
+    "structlog>=24.1.0",
+    # Crypto
+    "cryptography>=42.0.0",
+    "aiofiles>=23.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+    "freezegun>=1.4.0",
+    "respx>=0.21.0",
+    "httpx[http2]>=0.27.0",
+]
+
+[project.scripts]
+homepod-agent = "agent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"

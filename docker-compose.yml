@@ -1,0 +1,97 @@
+# docker-compose.yml — full system stack
+#
+# Optional: bring up everything via Docker instead of `make run`.
+# Most users will prefer `make run` since the agent needs access to the LAN
+# (mDNS, HAP socket on a real network interface). Docker adds complexity.
+#
+# This compose file is provided for users who want to run on a non-Mac host
+# (Linux NAS, Intel NUC, etc.) or for testing in CI.
+
+version: "3.9"
+
+x-agent-base: &agent-base
+  build:
+    context: ./agent
+    dockerfile: Dockerfile
+  environment: &agent-env
+    - HOME_POD_AGENT_STATE_DIR=/state
+    - OLLAMA_HOST=http://ollama:11434
+    - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    - LOG_LEVEL=info
+  volumes:
+    - agent-state:/state
+  restart: unless-stopped
+  network_mode: host   # required for HomeKit mDNS / HAP socket
+
+services:
+
+  # ---- local LLM ---------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: homepod-ollama
+    network_mode: host
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+
+  # ---- main agent service ------------------------------------------------
+  agent-llm:
+    <<: *agent-base
+    container_name: homepod-agent-llm
+    command: ["python", "-m", "uvicorn", "llm.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      - ollama
+
+  # ---- HomeKit control layer -------------------------------------------
+  agent-homekit:
+    <<: *agent-base
+    container_name: homepod-agent-homekit
+    command: ["python", "-m", "homekit.daemon"]
+    depends_on:
+      - agent-llm
+
+  # ---- voice bridge (mac only; Linux can stub) --------------------------
+  agent-voice:
+    <<: *agent-base
+    container_name: homepod-agent-voice
+    command: ["python", "-m", "voice.main"]
+    depends_on:
+      - agent-llm
+    profiles: ["mac"]
+
+  # ---- camera proxy -----------------------------------------------------
+  agent-cameras:
+    <<: *agent-base
+    container_name: homepod-agent-cameras
+    command: ["python", "-m", "cameras.proxy", "--port", "8001"]
+    depends_on:
+      - agent-llm
+
+  # ---- dashboard --------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: homepod-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_AGENT_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
+    depends_on:
+      - agent-llm
+    restart: unless-stopped
+
+  # ---- go2rtc for RTSP→HLS ---------------------------------------------
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: homepod-go2rtc
+    network_mode: host
+    volumes:
+      - ./agent/cameras/go2rtc.yaml:/config/go2rtc.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  agent-state:
+  ollama-models:

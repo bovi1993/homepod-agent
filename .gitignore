@@ -1,0 +1,46 @@
+# Build
+node_modules/
+.next/
+dist/
+build/
+.swc/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# State
+state/
+*.db
+pairing.json
+snapshot.json
+
+# Swift
+.build/
+.swiftpm/
+DerivedData/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+/tmp/
+.pytest_cache/
+.coverage
+htmlcov/
