@@ -99,7 +99,7 @@ docs/                  Architecture, pairing, voice docs
 | LLM agent | `agent/llm/` | Working — Ollama + Anthropic routing |
 | Voice output (HomePod) | `agent/voice/` | Working — mDNS discovery + AirPlay 2 stream |
 | Voice input (iPad) | `ipad-listen/` | Skeleton — basic Swift client, WebSocket audio |
-| Dashboard | `dashboard/` | Working — home/chat/settings/cameras pages |
+| Dashboard | `dashboard/` | Working — room-first dark UI, scenes, device tiles, chat/cameras |
 | Cameras | `agent/cameras/` | Skeleton — ONVIF discovery, RTSP→HLS placeholder |
 
 ## License
